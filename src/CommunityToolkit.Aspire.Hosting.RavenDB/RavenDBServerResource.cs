@@ -19,7 +19,23 @@ public class RavenDBServerResource(string name, bool isSecured) : ContainerResou
     /// </summary>
     internal string TcpEndpointName = "tcp";
 
+    /// <summary>
+    /// The public server URL (domain) configured for this resource./>.
+    /// </summary>
     internal string? PublicServerUrl { get; init; }
+
+    /// <summary>
+    /// Optional path to a client certificate file on the host machine that should be
+    /// used by consumers of this resource (for example, health checks) when connecting
+    /// to the secured RavenDB server.
+    /// </summary>
+    internal string? ClientCertificatePath { get; init; }
+
+    /// <summary>
+    /// Optional password for the client certificate specified by <see cref="ClientCertificatePath"/>.
+    /// </summary>
+    internal string? ClientCertificatePassword { get; init; }
+
 
     private EndpointReference? _primaryEndpoint;
     private EndpointReference? tcpEndpoint;

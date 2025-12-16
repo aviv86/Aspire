@@ -60,6 +60,9 @@ public class RavenDBServerSettings
         };
     }
 
+    // TODO : add XML docs for clientCertificatePath and clientCertificatePassword
+
+
     /// <summary>
     /// Creates a secured RavenDB server settings object with the specified configuration.
     /// </summary>
@@ -67,13 +70,22 @@ public class RavenDBServerSettings
     /// <param name="certificatePath">The path to the certificate file.</param>
     /// <param name="certificatePassword">The password for the certificate file, if required. Optional.</param>
     /// <param name="serverUrl">The optional server URL.</param>
+    /// <param name="clientCertificatePath">
+    /// Optional path to a client certificate file on the host machine that will be used
+    /// by client components such as health checks when connecting to the secured RavenDB server.
+    /// </param>
+    /// <param name="clientCertificatePassword">
+    /// Optional password for the client certificate file specified by <paramref name="clientCertificatePath"/>.
+    /// </param>
     public static RavenDBServerSettings SecuredWithLetsEncrypt(string domainUrl, string certificatePath,
-        string? certificatePassword = null, string? serverUrl = null)
+        string? certificatePassword = null, string? serverUrl = null, string? clientCertificatePath = null, string? clientCertificatePassword = null)
     {
         return new RavenDBSecuredServerSettings(certificatePath, certificatePassword, domainUrl)
         {
             SetupMode = SetupMode.LetsEncrypt,
-            ServerUrl = serverUrl
+            ServerUrl = serverUrl,
+            ClientCertificatePath = clientCertificatePath,
+            ClientCertificatePassword = clientCertificatePassword
         };
     }
 
@@ -107,6 +119,17 @@ public sealed class RavenDBSecuredServerSettings(string certificatePath, string?
     /// The public server URL (domain) that the secured RavenDB server will expose.
     /// </summary>
     public string PublicServerUrl { get; } = publicServerUrl;
+
+    /// <summary>
+    /// Optional path to a client certificate file on the host machine.
+    /// This certificate is used by client-side components (for example, health checks)
+    /// when connecting to the secured RavenDB server that requires client certificate authentication.
+    /// </summary>
+    public string? ClientCertificatePath { get; init; }
+    /// <summary>
+    /// Optional password for the client certificate file specified by <see cref="ClientCertificatePath"/>.
+    /// </summary>
+    public string? ClientCertificatePassword { get; init; }
 }
 
 /// <summary>

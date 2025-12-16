@@ -2,13 +2,15 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using System.Data.Common;
+using System.Runtime.ConstrainedExecution;
+using System.Security.Cryptography.X509Certificates;
 
 namespace CommunityToolkit.Aspire.Hosting.RavenDB;
 
 internal static class HealthChecksExtensions
 {
     private const string NAME = "ravendb";
-
+    //todo add description for cert parameter
     /// <summary>
     /// Add a health check for RavenDB server services.
     /// </summary>
@@ -17,6 +19,7 @@ internal static class HealthChecksExtensions
     /// <param name="name">The health check name. Optional. If <c>null</c> the type name 'ravendb' will be used for the name.</param>
     /// <param name="failureStatus">that should be reported when the health check fails. Optional. If <c>null</c> then
     /// the default status of <see cref="HealthStatus.Unhealthy"/> will be reported.</param>
+    /// <param name="certificate"></param>
     /// <param name="tags">A list of tags that can be used to filter sets of health checks. Optional.</param>
     /// <param name="timeout">An optional <see cref="TimeSpan"/> representing the timeout of the check.</param>
     /// <returns>The specified <paramref name="builder"/>.</returns>
@@ -25,6 +28,7 @@ internal static class HealthChecksExtensions
         Func<IServiceProvider, string> connectionStringFactory,
         string? name = default,
         HealthStatus? failureStatus = default,
+        X509Certificate2? certificate = null,
         IEnumerable<string>? tags = default,
         TimeSpan? timeout = default)
     {
@@ -33,7 +37,7 @@ internal static class HealthChecksExtensions
             sp =>
             {
                 var connectionString = ValidateConnectionString(connectionStringFactory, sp);
-                return new RavenDBHealthCheck(new RavenDBOptions { Urls = new[] { connectionString } });
+                return new RavenDBHealthCheck(new RavenDBOptions { Urls = new[] { connectionString }, Certificate = certificate});
             },
             failureStatus,
             tags,

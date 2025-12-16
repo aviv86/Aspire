@@ -1,6 +1,14 @@
 ﻿using Aspire.Hosting.ApplicationModel;
 using CommunityToolkit.Aspire.Hosting.RavenDB;
 using Microsoft.Extensions.DependencyInjection;
+using Raven.Client.Documents;
+using Raven.Client.Exceptions;
+using Raven.Client.ServerWide;
+using Raven.Client.ServerWide.Operations;
+using System.Data.Common;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Aspire.Hosting;
 
@@ -57,7 +65,9 @@ public static class RavenDBBuilderExtensions
 
         var serverResource = new RavenDBServerResource(name, isSecured: securedSettings is not null)
         {
-            PublicServerUrl = securedSettings?.PublicServerUrl
+            PublicServerUrl = securedSettings?.PublicServerUrl,
+            ClientCertificatePath = securedSettings?.ClientCertificatePath,
+            ClientCertificatePassword = securedSettings?.ClientCertificatePassword
         };
 
         return AddRavenDbInternal(builder, name, serverResource, environmentVariables, serverSettings.Port, serverSettings.TcpPort);
@@ -97,26 +107,15 @@ public static class RavenDBBuilderExtensions
     int? port,
     int? tcpPort)
     {
-        string? connectionString = null;
-        builder.Eventing.Subscribe<ConnectionStringAvailableEvent>(serverResource, async (@event, ct) =>
-        {
-            connectionString = await serverResource.ConnectionStringExpression.GetValueAsync(ct)
-                .ConfigureAwait(false);
 
-            if (connectionString is null)
-                throw new DistributedApplicationException(
-                    $"ConnectionStringAvailableEvent was published for the '{serverResource.Name}' resource but the connection string was null.");
-        });
 
-        var healthCheckKey = $"{name}_check";
-        builder.Services.AddHealthChecks()
-            .AddRavenDB(_ => connectionString ?? throw new InvalidOperationException("Connection string is unavailable"),
-                name: healthCheckKey);
+
+        string healthCheckKey = AddRavenDBHealthCheck(builder, name, serverResource, environmentVariables);
 
         var effectiveTcpPort = tcpPort ?? 38888;
-
-        return builder
-            .AddResource(serverResource)
+        
+        var serverBuilder =
+            builder.AddResource(serverResource)
             .WithEndpoint(
                 port: port,
                 targetPort: serverResource.IsSecured ? 443 : 8080,
@@ -132,7 +131,49 @@ public static class RavenDBBuilderExtensions
             .WithImageRegistry(RavenDBContainerImageTags.Registry)
             .WithEnvironment(context => ConfigureEnvironmentVariables(context, serverResource, environmentVariables))
             .WithHealthCheck(healthCheckKey);
+
+        return serverBuilder;
     }
+
+    private static string AddRavenDBHealthCheck(IDistributedApplicationBuilder builder, string name,
+        RavenDBServerResource serverResource, Dictionary<string, object> environmentVariables)
+    {
+        string? connectionString = null;
+        builder.Eventing.Subscribe<ConnectionStringAvailableEvent>(serverResource, async (_, ct) =>
+        {
+            connectionString = await serverResource.ConnectionStringExpression.GetValueAsync(ct)
+                .ConfigureAwait(false);
+
+            if (connectionString is null)
+                throw new DistributedApplicationException(
+                    $"ConnectionStringAvailableEvent was published for the '{serverResource.Name}' resource but the connection string was null.");
+        });
+
+        X509Certificate2? certificate = null;
+        if (serverResource is { IsSecured: true, ClientCertificatePath: not null })
+        {
+            try
+            {
+#pragma warning disable SYSLIB0057
+                certificate = new X509Certificate2(serverResource.ClientCertificatePath, serverResource.ClientCertificatePassword);
+#pragma warning restore SYSLIB0057
+            }
+            catch (Exception e)
+            {
+                throw new InvalidOperationException($"Failed to create X509Certificate2 instance from certificate path '{serverResource.ClientCertificatePath}'.", e);
+            }
+        }
+
+
+        var healthCheckKey = $"{name}_check";
+        builder.Services.AddHealthChecks()
+            .AddRavenDB(_ => connectionString ?? throw new InvalidOperationException("Connection string is unavailable"),
+                name: healthCheckKey, 
+                certificate: certificate);
+
+        return healthCheckKey;
+    }
+
 
     private static Dictionary<string, object> GetEnvironmentVariablesFromServerSettings(RavenDBServerSettings serverSettings)
     {
@@ -189,12 +230,14 @@ public static class RavenDBBuilderExtensions
     /// <param name="builder">The resource builder for the RavenDB server.</param>
     /// <param name="name">The name of the database resource.</param>
     /// <param name="databaseName">The name of the database to create/add. Defaults to the same name as the resource if not provided.</param>
+    /// <param name="ensureCreated">Indicates whether the database should be created on startup if it does not already exist.</param>
     /// <returns>A resource builder for the newly added RavenDB database resource.</returns>
     /// <exception cref="DistributedApplicationException">Thrown when the connection string cannot be retrieved during configuration.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the connection string is unavailable.</exception>
     public static IResourceBuilder<RavenDBDatabaseResource> AddDatabase(this IResourceBuilder<RavenDBServerResource> builder,
         [ResourceName] string name,
-        string? databaseName = null)
+        string? databaseName = null,
+        bool ensureCreated = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(name);
@@ -221,8 +264,59 @@ public static class RavenDBBuilderExtensions
                 databaseName: databaseName,
                 name: healthCheckKey);
 
-        return builder.ApplicationBuilder
-            .AddResource(databaseResource);
+        var dbBuilder = builder.ApplicationBuilder.AddResource(databaseResource);
+
+        if (ensureCreated)
+        {
+            //if (databaseResource.Parent.IsSecured)
+            //    throw new InvalidOperationException("Ensuring database creation is currently not supported in secured setup.");
+
+            dbBuilder.OnResourceReady(async (resource, ie, ct) =>
+            {
+                var connString = await databaseResource.ConnectionStringExpression.GetValueAsync(ct);
+                if (string.IsNullOrEmpty(connString))
+                    throw new InvalidOperationException("RavenDB connection string is not available.");
+
+                var csb = new DbConnectionStringBuilder { ConnectionString = connString };
+
+                if (!csb.TryGetValue("URL", out var urlObj) || urlObj is not string url)
+                    throw new InvalidOperationException("Connection string is missing 'URL'.");
+
+                X509Certificate2? cert = null;
+                if (databaseResource.Parent.IsSecured && databaseResource.Parent.ClientCertificatePath is { } certPath)
+                {
+#pragma warning disable SYSLIB0057
+                    cert = new X509Certificate2(certPath, databaseResource.Parent.ClientCertificatePassword);
+#pragma warning restore SYSLIB0057
+                }
+
+                using var store = new DocumentStore
+                {
+                    Urls = [url],
+                    Certificate = cert
+                }.Initialize();
+
+                var record = await store.Maintenance.Server
+                    .SendAsync(new GetDatabaseRecordOperation(resource.DatabaseName), ct);
+
+                if (record == null)
+                    await store.Maintenance.Server.SendAsync(new CreateDatabaseOperation(new DatabaseRecord(resource.DatabaseName)), ct);
+
+            });
+        }
+
+        return dbBuilder;
+    }
+
+    private static bool IsTransientStartupException(RavenException ex)
+    {
+        // You can tune this based on what you actually see:
+        // - AuthenticationException from SSL handshake
+        // - IOException / SocketException from connection reset / refused
+        // - etc.
+        return ex.InnerException is AuthenticationException
+            or IOException
+            or SocketException;
     }
 
     /// <summary>
@@ -290,4 +384,5 @@ public static class RavenDBBuilderExtensions
 
         return builder.WithVolume(name ?? VolumeNameGenerator.Generate(builder, "logs"), "/var/log/ravendb/logs", isReadOnly);
     }
+
 }
